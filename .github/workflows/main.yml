@@ -31,30 +31,45 @@ jobs:
             --output-file=wget.log \
             https://www.lhh.com/en-us
 
-          # Extract only valid internal URLs
-          grep -oP 'https?://www\.lhh\.com/en-us[^ ]+' wget.log \
+          echo "📄 Extracting URLs..."
+          # Match any internal lhh.com page (not just /en-us)
+          grep -oP 'https?://www\.lhh\.com[^ ]+' wget.log \
+            | grep -E '^https?://www\.lhh\.com' \
             | sort -u \
             | head -n 30 > urls.txt
 
           echo "✅ Found $(wc -l < urls.txt) URLs:"
-          cat urls.txt
+          cat urls.txt || true
 
-      - name: Convert pages to PDF (in parallel)
+      - name: Convert pages to PDF (in parallel, with logging)
         run: |
           mkdir -p pdfs
           echo "🧾 Converting pages to PDF..."
 
+          if [ ! -s urls.txt ]; then
+            echo "⚠️ No URLs found to convert!"
+            exit 0
+          fi
+
+          # Convert URLs to PDFs (4 in parallel, 90s timeout)
           cat urls.txt | parallel -j 4 '
             name=$(echo {} | sed -e "s|https\?://||" -e "s|/|_|g");
             echo "📄 Converting: {} -> pdfs/${name}.pdf"
-            timeout 90s wkhtmltopdf --quiet --enable-local-file-access {} pdfs/${name}.pdf
+            if ! timeout 90s wkhtmltopdf --enable-local-file-access {} pdfs/${name}.pdf; then
+              echo "❌ Failed: {}" >> failed.txt
+            fi
           '
 
-          echo "✅ PDF generation complete!"
-          ls -lh pdfs | head
+          echo "✅ Conversion complete."
+          echo "📦 Generated PDFs:"
+          ls -lh pdfs || true
+          echo "❌ Failed URLs (if any):"
+          cat failed.txt || true
 
       - name: Upload PDFs as artifacts
+        if: success() || always()
         uses: actions/upload-artifact@v4
         with:
           name: lhh-website-pdfs
           path: pdfs/
+          if-no-files-found: warn
