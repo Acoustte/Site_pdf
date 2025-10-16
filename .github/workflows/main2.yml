@@ -1,13 +1,14 @@
-name: Crawl and Convert to PDF (Puppeteer)
+name: Crawl and Convert Full Site to PDF (Puppeteer)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 2 * * *" # Daily at 2 AM UTC
 
 jobs:
-  puppeteer-pdfs:
+  crawl-and-pdf:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout Repository
@@ -20,16 +21,57 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install puppeteer p-limit
+          npm install puppeteer p-limit cheerio axios
 
-      - name: Create URLs list
+      - name: Crawl website and extract URLs (2 levels deep)
         run: |
-          echo "https://www.lhh.com/en-us" > urls.txt
-          echo "https://www.lhh.com/en-us/about" >> urls.txt
-          echo "https://www.lhh.com/en-us/industries" >> urls.txt
-          echo "https://www.lhh.com/en-us/services" >> urls.txt
-          echo "https://www.lhh.com/en-us/contact" >> urls.txt
-          echo "https://www.lhh.com/en-us/insights" >> urls.txt
+          node <<'EOF'
+          const axios = require('axios');
+          const cheerio = require('cheerio');
+          const fs = require('fs');
+          const { URL } = require('url');
+
+          const startUrl = 'https://www.lhh.com/en-us';
+          const domain = new URL(startUrl).hostname;
+          const visited = new Set();
+          const urls = new Set([startUrl]);
+          const maxDepth = 2;
+
+          async function crawl(url, depth) {
+            if (depth > maxDepth || visited.has(url)) return;
+            visited.add(url);
+
+            try {
+              console.log(`🌐 Crawling [${depth}]: ${url}`);
+              const res = await axios.get(url, { timeout: 20000 });
+              const $ = cheerio.load(res.data);
+
+              $('a[href]').each((_, el) => {
+                let href = $(el).attr('href');
+                if (!href) return;
+                if (href.startsWith('/')) href = `https://${domain}${href}`;
+                if (!href.startsWith('https://www.lhh.com/en-us')) return;
+                if (!visited.has(href)) urls.add(href);
+              });
+            } catch (err) {
+              console.error(`⚠️ Failed to crawl ${url}: ${err.message}`);
+            }
+
+            // Crawl linked pages one level deeper
+            if (depth < maxDepth) {
+              for (const next of [...urls]) {
+                if (!visited.has(next)) await crawl(next, depth + 1);
+              }
+            }
+          }
+
+          (async () => {
+            await crawl(startUrl, 1);
+            const urlList = Array.from(urls);
+            fs.writeFileSync('urls.txt', urlList.join('\n'));
+            console.log(`✅ Found ${urlList.length} URLs`);
+          })();
+          EOF
 
       - name: Generate PDFs using Puppeteer
         run: |
@@ -37,10 +79,10 @@ jobs:
           node <<'EOF'
           const fs = require('fs');
           const puppeteer = require('puppeteer');
-          const pLimit = require('p-limit').default; // ✅ FIXED HERE
+          const pLimit = require('p-limit').default;
 
           const urls = fs.readFileSync('urls.txt', 'utf8').trim().split('\n').filter(Boolean);
-          const limit = pLimit(3); // run 3 pages at a time
+          const limit = pLimit(3);
 
           (async () => {
             const browser = await puppeteer.launch({
@@ -52,20 +94,20 @@ jobs:
               const page = await browser.newPage();
               await page.setViewport({ width: 1280, height: 800 });
               try {
-                console.log(`🌐 Visiting: ${url}`);
+                console.log(`📄 Rendering: ${url}`);
                 await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-                await new Promise(res => setTimeout(res, 3000)); // wait 3s for JS content
+                await new Promise(res => setTimeout(res, 3000)); // Wait 3s for JS to load fully
 
-                const safeName = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
-                const filePath = `pdfs/${safeName}.pdf`;
+                const safe = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
+                const pdfPath = `pdfs/${safe}.pdf`;
                 await page.pdf({
-                  path: filePath,
+                  path: pdfPath,
                   format: 'A4',
                   printBackground: true,
                   margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' }
                 });
 
-                console.log(`✅ Saved: ${filePath}`);
+                console.log(`✅ Saved: ${pdfPath}`);
               } catch (err) {
                 console.error(`❌ Failed: ${url} — ${err.message}`);
               } finally {
@@ -82,5 +124,5 @@ jobs:
       - name: Upload PDFs as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lhh-website-pdfs
+          name: lhh-fullsite-pdfs
           path: pdfs/
