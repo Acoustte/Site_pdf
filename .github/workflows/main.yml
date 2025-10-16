@@ -1,0 +1,39 @@
+name: Crawl and Convert to PDF
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  generate-pdfs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget wkhtmltopdf
+
+      - name: Crawl website and extract URLs
+        run: |
+          mkdir -p pdfs
+          wget --recursive --level=2 --spider --no-verbose --output-file=wget.log https://www.lhh.com/en-us
+          grep -oP 'https?://[^ ]+' wget.log | sort -u > urls.txt
+
+      - name: Convert pages to PDF
+        run: |
+          mkdir -p pdfs
+          while read -r url; do
+            name=$(echo "$url" | sed -e 's|https\?://||' -e 's|/|_|g')
+            wkhtmltopdf --quiet --enable-local-file-access "$url" "pdfs/${name}.pdf"
+          done < urls.txt
+
+      - name: Upload PDFs as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lhh-website-pdfs
+          path: pdfs/
