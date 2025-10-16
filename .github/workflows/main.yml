@@ -22,23 +22,23 @@ jobs:
       - name: Crawl website and extract URLs
         run: |
           mkdir -p pdfs
-          echo "🔍 Crawling website..."
+          echo "🔍 Crawling website (2 levels deep)..."
           
-          # Crawl 1 level deep, stay on same domain, and only HTML pages
-          wget --spider --no-verbose --level=1 \
+          # Crawl 2 levels deep, stay on same domain, only HTML pages
+          wget --spider --no-verbose --level=2 \
             --accept html,htm \
             --domains=www.lhh.com \
             --output-file=wget.log \
             https://www.lhh.com/en-us
 
           echo "📄 Extracting URLs..."
-          # Match any internal lhh.com page (not just /en-us)
+          # Capture all internal URLs (not just /en-us)
           grep -oP 'https?://www\.lhh\.com[^ ]+' wget.log \
             | grep -E '^https?://www\.lhh\.com' \
             | sort -u \
-            | head -n 30 > urls.txt
+            | head -n 50 > urls.txt
 
-          echo "✅ Found $(wc -l < urls.txt) URLs:"
+          echo "✅ Found $(wc -l < urls.txt) URLs to convert:"
           cat urls.txt || true
 
       - name: Convert pages to PDF (in parallel, with logging)
@@ -64,7 +64,7 @@ jobs:
           echo "📦 Generated PDFs:"
           ls -lh pdfs || true
           echo "❌ Failed URLs (if any):"
-          cat failed.txt || true
+          cat failed.txt 2>/dev/null || echo "✅ No failures."
 
       - name: Upload PDFs as artifacts
         if: success() || always()
