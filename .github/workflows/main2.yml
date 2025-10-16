@@ -3,7 +3,7 @@ name: Crawl and Convert to PDF (Puppeteer)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *" # runs daily at 2 AM UTC
+    - cron: "0 2 * * *"
 
 jobs:
   puppeteer-pdfs:
@@ -37,10 +37,10 @@ jobs:
           node <<'EOF'
           const fs = require('fs');
           const puppeteer = require('puppeteer');
-          const pLimit = require('p-limit');
+          const pLimit = require('p-limit').default; // ✅ FIXED HERE
 
           const urls = fs.readFileSync('urls.txt', 'utf8').trim().split('\n').filter(Boolean);
-          const limit = pLimit(3);
+          const limit = pLimit(3); // run 3 pages at a time
 
           (async () => {
             const browser = await puppeteer.launch({
