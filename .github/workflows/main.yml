@@ -3,11 +3,12 @@ name: Crawl and Convert to PDF
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 2 * * *" # Runs daily at 2 AM UTC
 
 jobs:
   generate-pdfs:
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # Prevents infinite runs
 
     steps:
       - name: Checkout Repository
@@ -16,21 +17,41 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget wkhtmltopdf
+          sudo apt-get install -y wget wkhtmltopdf parallel
 
       - name: Crawl website and extract URLs
         run: |
           mkdir -p pdfs
-          wget --recursive --level=2 --spider --no-verbose --output-file=wget.log https://www.lhh.com/en-us
-          grep -oP 'https?://[^ ]+' wget.log | sort -u > urls.txt
+          echo "🔍 Crawling website..."
+          
+          # Crawl 1 level deep, stay on same domain, and only HTML pages
+          wget --spider --no-verbose --level=1 \
+            --accept html,htm \
+            --domains=www.lhh.com \
+            --output-file=wget.log \
+            https://www.lhh.com/en-us
 
-      - name: Convert pages to PDF
+          # Extract only valid internal URLs
+          grep -oP 'https?://www\.lhh\.com/en-us[^ ]+' wget.log \
+            | sort -u \
+            | head -n 30 > urls.txt
+
+          echo "✅ Found $(wc -l < urls.txt) URLs:"
+          cat urls.txt
+
+      - name: Convert pages to PDF (in parallel)
         run: |
           mkdir -p pdfs
-          while read -r url; do
-            name=$(echo "$url" | sed -e 's|https\?://||' -e 's|/|_|g')
-            wkhtmltopdf --quiet --enable-local-file-access "$url" "pdfs/${name}.pdf"
-          done < urls.txt
+          echo "🧾 Converting pages to PDF..."
+
+          cat urls.txt | parallel -j 4 '
+            name=$(echo {} | sed -e "s|https\?://||" -e "s|/|_|g");
+            echo "📄 Converting: {} -> pdfs/${name}.pdf"
+            timeout 90s wkhtmltopdf --quiet --enable-local-file-access {} pdfs/${name}.pdf
+          '
+
+          echo "✅ PDF generation complete!"
+          ls -lh pdfs | head
 
       - name: Upload PDFs as artifacts
         uses: actions/upload-artifact@v4
