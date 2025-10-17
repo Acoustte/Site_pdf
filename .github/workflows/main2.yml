@@ -1,12 +1,12 @@
-name: Crawl and Convert Full Site Content to Text PDF
+name: Crawl and Convert Full Site to Clean Text PDF
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *" # Runs daily at 2 AM UTC
+    - cron: "0 2 * * *" # Daily at 2 AM UTC
 
 jobs:
-  crawl-and-extract:
+  crawl-and-convert:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -21,15 +21,16 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install axios cheerio p-limit pdfkit
+          npm install axios cheerio jsdom @mozilla/readability pdfkit p-limit
 
-      - name: Crawl website and extract URLs (2 levels deep)
+      - name: Crawl website (2 levels deep)
         run: |
           node <<'EOF'
           const { URL } = require('url');
           const axios = require('axios');
           const cheerio = require('cheerio');
           const fs = require('fs');
+
           const startUrl = 'https://www.lhh.com/en-us';
           const domain = new URL(startUrl).hostname;
           const visited = new Set();
@@ -40,15 +41,16 @@ jobs:
             if (depth > maxDepth || visited.has(url)) return;
             visited.add(url);
             try {
-              console.log(`🌐 Crawling [${depth}]: ${url}`);
+              console.log(`🌐 Crawling (${depth}): ${url}`);
               const res = await axios.get(url, { timeout: 20000 });
               const $ = cheerio.load(res.data);
               $('a[href]').each((_, el) => {
                 let href = $(el).attr('href');
                 if (!href) return;
                 if (href.startsWith('/')) href = `https://${domain}${href}`;
-                if (!href.startsWith('https://www.lhh.com/en-us')) return;
-                if (!visited.has(href)) urls.add(href);
+                if (href.startsWith('https://www.lhh.com/en-us') && !visited.has(href)) {
+                  urls.add(href);
+                }
               });
             } catch (err) {
               console.error(`⚠️ Failed to crawl ${url}: ${err.message}`);
@@ -67,13 +69,14 @@ jobs:
           })();
           EOF
 
-      - name: Extract text content and generate PDFs
+      - name: Extract readable text & generate PDFs
         run: |
           mkdir -p pdfs
           node <<'EOF'
           const fs = require('fs');
           const axios = require('axios');
-          const cheerio = require('cheerio');
+          const { JSDOM } = require('jsdom');
+          const { Readability } = require('@mozilla/readability');
           const PDFDocument = require('pdfkit');
           const pLimit = require('p-limit').default;
 
@@ -84,53 +87,46 @@ jobs:
             for (const url of urls) {
               await limit(async () => {
                 try {
-                  console.log(`📝 Extracting content from: ${url}`);
-                  const res = await axios.get(url, { timeout: 20000 });
-                  const $ = cheerio.load(res.data);
+                  console.log(`🧠 Extracting: ${url}`);
+                  const res = await axios.get(url, { timeout: 30000 });
+                  const dom = new JSDOM(res.data, { url });
+                  const reader = new Readability(dom.window.document);
+                  const article = reader.parse();
 
-                  // Extract text content
-                  let title = $('h1').first().text().trim() || $('title').text().trim();
-                  let content = '';
-
-                  $('h1, h2, h3, h4, h5, h6, p, li').each((_, el) => {
-                    const tag = el.tagName.toLowerCase();
-                    const text = $(el).text().trim();
-                    if (!text) return;
-                    if (['h1','h2','h3'].includes(tag)) content += `\n\n# ${text}\n`;
-                    else if (tag === 'li') content += `• ${text}\n`;
-                    else content += `${text}\n\n`;
-                  });
-
-                  if (!content) {
+                  if (!article || !article.textContent.trim()) {
                     console.log(`⚠️ No readable content found at: ${url}`);
                     return;
                   }
 
-                  // Create clean PDF
-                  const safe = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
-                  const pdfPath = `pdfs/${safe}.pdf`;
+                  const title = article.title || 'Untitled Page';
+                  const safeName = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
+                  const pdfPath = `pdfs/${safeName}.pdf`;
+
+                  // Create formatted text PDF
                   const doc = new PDFDocument({ margin: 50 });
                   const stream = fs.createWriteStream(pdfPath);
                   doc.pipe(stream);
 
                   doc.fontSize(18).text(title, { underline: true });
                   doc.moveDown();
-                  doc.fontSize(12).text(content, { align: 'left' });
+                  doc.fontSize(12).text(article.textContent.trim(), {
+                    align: 'left',
+                    lineGap: 4,
+                  });
 
                   doc.end();
                   await new Promise(res => stream.on('finish', res));
-
-                  console.log(`✅ Saved clean text PDF: ${pdfPath}`);
+                  console.log(`✅ Saved clean PDF: ${pdfPath}`);
                 } catch (err) {
-                  console.error(`❌ Failed to extract ${url}: ${err.message}`);
+                  console.error(`❌ Failed to process ${url}: ${err.message}`);
                 }
               });
             }
           })();
           EOF
 
-      - name: Upload Clean Text PDFs
+      - name: Upload PDFs as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lhh-text-pdfs
+          name: lhh-clean-text-pdfs
           path: pdfs/
