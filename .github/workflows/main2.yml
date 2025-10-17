@@ -1,4 +1,4 @@
-name: Crawl and Convert Full Site to PDF (Puppeteer)
+name: Crawl and Convert Full Site Content to Text PDF
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: "0 2 * * *" # Runs daily at 2 AM UTC
 
 jobs:
-  crawl-and-pdf:
+  crawl-and-extract:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -21,16 +21,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install puppeteer p-limit cheerio axios
+          npm install axios cheerio p-limit pdfkit
 
       - name: Crawl website and extract URLs (2 levels deep)
         run: |
           node <<'EOF'
-          const { URL } = require('url'); // ✅ Fix for Node.js v20
+          const { URL } = require('url');
           const axios = require('axios');
           const cheerio = require('cheerio');
           const fs = require('fs');
-
           const startUrl = 'https://www.lhh.com/en-us';
           const domain = new URL(startUrl).hostname;
           const visited = new Set();
@@ -40,12 +39,10 @@ jobs:
           async function crawl(url, depth) {
             if (depth > maxDepth || visited.has(url)) return;
             visited.add(url);
-
             try {
               console.log(`🌐 Crawling [${depth}]: ${url}`);
               const res = await axios.get(url, { timeout: 20000 });
               const $ = cheerio.load(res.data);
-
               $('a[href]').each((_, el) => {
                 let href = $(el).attr('href');
                 if (!href) return;
@@ -56,7 +53,6 @@ jobs:
             } catch (err) {
               console.error(`⚠️ Failed to crawl ${url}: ${err.message}`);
             }
-
             if (depth < maxDepth) {
               for (const next of [...urls]) {
                 if (!visited.has(next)) await crawl(next, depth + 1);
@@ -66,62 +62,75 @@ jobs:
 
           (async () => {
             await crawl(startUrl, 1);
-            const urlList = Array.from(urls);
-            fs.writeFileSync('urls.txt', urlList.join('\n'));
-            console.log(`✅ Found ${urlList.length} URLs`);
+            fs.writeFileSync('urls.txt', Array.from(urls).join('\n'));
+            console.log(`✅ Found ${urls.size} URLs`);
           })();
           EOF
 
-      - name: Generate PDFs using Puppeteer
+      - name: Extract text content and generate PDFs
         run: |
           mkdir -p pdfs
           node <<'EOF'
           const fs = require('fs');
-          const puppeteer = require('puppeteer');
+          const axios = require('axios');
+          const cheerio = require('cheerio');
+          const PDFDocument = require('pdfkit');
           const pLimit = require('p-limit').default;
 
           const urls = fs.readFileSync('urls.txt', 'utf8').trim().split('\n').filter(Boolean);
-          const limit = pLimit(3); // 3 pages in parallel
+          const limit = pLimit(3);
 
           (async () => {
-            const browser = await puppeteer.launch({
-              headless: true,
-              args: ['--no-sandbox', '--disable-setuid-sandbox']
-            });
+            for (const url of urls) {
+              await limit(async () => {
+                try {
+                  console.log(`📝 Extracting content from: ${url}`);
+                  const res = await axios.get(url, { timeout: 20000 });
+                  const $ = cheerio.load(res.data);
 
-            const tasks = urls.map(url => limit(async () => {
-              const page = await browser.newPage();
-              await page.setViewport({ width: 1280, height: 800 });
-              try {
-                console.log(`📄 Rendering: ${url}`);
-                await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-                await new Promise(res => setTimeout(res, 3000)); // wait for JS content
+                  // Extract text content
+                  let title = $('h1').first().text().trim() || $('title').text().trim();
+                  let content = '';
 
-                const safe = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
-                const pdfPath = `pdfs/${safe}.pdf`;
-                await page.pdf({
-                  path: pdfPath,
-                  format: 'A4',
-                  printBackground: true,
-                  margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' }
-                });
+                  $('h1, h2, h3, h4, h5, h6, p, li').each((_, el) => {
+                    const tag = el.tagName.toLowerCase();
+                    const text = $(el).text().trim();
+                    if (!text) return;
+                    if (['h1','h2','h3'].includes(tag)) content += `\n\n# ${text}\n`;
+                    else if (tag === 'li') content += `• ${text}\n`;
+                    else content += `${text}\n\n`;
+                  });
 
-                console.log(`✅ Saved: ${pdfPath}`);
-              } catch (err) {
-                console.error(`❌ Failed: ${url} — ${err.message}`);
-              } finally {
-                await page.close();
-              }
-            }));
+                  if (!content) {
+                    console.log(`⚠️ No readable content found at: ${url}`);
+                    return;
+                  }
 
-            await Promise.all(tasks);
-            await browser.close();
-            console.log('🏁 All PDFs generated successfully!');
+                  // Create clean PDF
+                  const safe = url.replace(/^https?:\/\//, '').replace(/[\/:?&=#]/g, '_');
+                  const pdfPath = `pdfs/${safe}.pdf`;
+                  const doc = new PDFDocument({ margin: 50 });
+                  const stream = fs.createWriteStream(pdfPath);
+                  doc.pipe(stream);
+
+                  doc.fontSize(18).text(title, { underline: true });
+                  doc.moveDown();
+                  doc.fontSize(12).text(content, { align: 'left' });
+
+                  doc.end();
+                  await new Promise(res => stream.on('finish', res));
+
+                  console.log(`✅ Saved clean text PDF: ${pdfPath}`);
+                } catch (err) {
+                  console.error(`❌ Failed to extract ${url}: ${err.message}`);
+                }
+              });
+            }
           })();
           EOF
 
-      - name: Upload PDFs as artifacts
+      - name: Upload Clean Text PDFs
         uses: actions/upload-artifact@v4
         with:
-          name: lhh-fullsite-pdfs
+          name: lhh-text-pdfs
           path: pdfs/
